@@ -1,0 +1,16 @@
+services:
+  app:
+    container_name: myrunlist
+    build: https://github.com/aklambeth/myRunList-scraper.git#master
+    volumes:
+      - ./data:/workspace/data
+      - ./logs:/workspace/logs
+      - ./output:/workspace/output
+    working_dir: /workspace
+    environment:
+      NH4_API_KEY: ${NH4_API_KEY}
+      DH3_API_KEY: ${DH3_API_KEY}
+      GOOGLE_GEOCODING_API_KEY: ${GOOGLE_GEOCODING_API_KEY}
+
+    stdin_open: true
+    tty: true

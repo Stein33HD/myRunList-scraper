@@ -320,6 +320,18 @@ lat + lng already present? → skip
 location.w3s present?
     → check cache (data/w3w_cache.json) → hit: use it
                                         → miss: scrape what3words.com → populate lat/lng, write cache
+↓ (still no coords, but has postcode)
+    → build query from location.address (or name) + postcode
+    → check cache (data/geocode_cache.json), keyed kennel:runno
+        → hit + same query: use it (negative entry → leave absent)
+        → miss / changed query:
+            GOOGLE_GEOCODING_API_KEY set AND breaker enabled?
+                → yes: call Google Geocoding API
+                    → OK: populate lat/lng, write positive cache entry
+                    → ZERO_RESULTS: write negative cache entry (never re-queried)
+                    → REQUEST_DENIED / OVER_QUERY_LIMIT / no key: fall back to Nominatim
+                → no (unavailable): fall back to Nominatim (keyless OpenStreetMap)
+                    → hit: populate lat/lng, write cache; miss: write negative entry
 ```
 
 ### W3W workaround
@@ -331,6 +343,20 @@ What Three Words does not offer a free API. As a workaround, `generators/enrichm
 ### W3W cache (`data/w3w_cache.json`)
 
 Results are cached indefinitely (up to 1000 entries, FIFO eviction). Cache is always checked before making an HTTP request. Concurrent-write safety is handled with `fcntl.flock()` + atomic `os.replace()`. Cache file is gitignored.
+
+### Google Geocoding + Nominatim fallback
+
+For records with no `w3s` and no coordinates (e.g. WWH3, whose venues expose only a Google Maps embed), `generators/enrichment.py` reassembles the embed's `q=` string — `location.address` (or `name`) plus `postcode` — and resolves `lat`/`lng` via the **Google Geocoding API** using our own key, with a **Nominatim (OpenStreetMap) fallback** when Google is unavailable.
+
+**Google first.** The step reads `GOOGLE_GEOCODING_API_KEY` (a shared enrichment key, not a per-site scraper key). When present and the Google breaker is healthy it queries Google. Google is treated as *unavailable* — and the step falls back to Nominatim — when the key is unset, the response is `REQUEST_DENIED` / `OVER_QUERY_LIMIT`, or the Google breaker is disabled.
+
+**Nominatim fallback.** `https://nominatim.openstreetmap.org/search` needs no key. It is queried with a descriptive `User-Agent` whenever Google is unavailable. This means geocoding still works with no API key configured at all.
+
+**Circuit breakers.** Two independent TTL breakers in `state/state.json`: `"enrich_geocode"` (Google) and `"enrich_nominatim"` (Nominatim), each `ttl_max=5`, decremented on *transient* failures (network error; for Google also after a tripped Google breaker hands off) and logged at `WARNING` when tripped. A clean `ZERO_RESULTS` / empty result counts as a success. `REQUEST_DENIED` / `OVER_QUERY_LIMIT` do **not** decrement the Google breaker — they route straight to Nominatim.
+
+### Geocode cache (`data/geocode_cache.json`)
+
+One entry per event, keyed by the stable identity `kennel:runno` (the canonical equivalent of the W3W triple) and **shared by both providers** (Google and Nominatim write the same key). Each entry stores `lat`, `lng`, and the `query` used. A cached entry is honoured only while its stored `query` matches; a changed address (corrected at source) is a miss and re-geocoded **in place** under the same key (self-heal, no orphan entries). `ZERO_RESULTS` / empty result is cached as a **negative entry** (`lat`/`lng` null) so an unresolvable address is never re-queried; transient failures are not cached. Indefinite (up to 1000 entries, FIFO eviction), same `fcntl.flock()` + atomic `os.replace()` machinery as the W3W cache. Cache file is gitignored.
 
 ---
 
@@ -425,3 +451,4 @@ Per-site strategy is documented in `docs/<name>.md` and referenced here.
 | `hh3`    | [docs/HH3.md](./docs/HH3.md)       | Hursley Hash House Harriers |
 | `chi3`   | [docs/CHI3.md](./docs/CHI3.md)     | Chichester Hash House Harriers |
 | `sh3`    | [docs/SH3.md](./docs/SH3.md)       | Surrey Hash House Harriers |
+| `wwh3`   | [docs/WWH3.md](./docs/WWH3.md)     | Worthy Winchester Hash House Harriers |

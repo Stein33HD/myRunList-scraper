@@ -12,8 +12,12 @@ A Python scraping pipeline that collects run data from multiple Hash House Harri
 | `r2d2h3` | R2D2 Hash House Harriers | Custom ASPX endpoint |
 | `hh3` | Hursley Hash House Harriers | Server-rendered HTML table |
 | `chi3` | Chichester Hash House Harriers | Server-rendered HTML table |
+| `sh3` | Surrey Hash House Harriers | Server-rendered HTML (Elementor) |
+| `wwh3` | Worthy Winchester Hash House Harriers | Server-rendered HTML (Google Maps embed) |
 
 ## Setup
+
+### Local
 
 ```bash
 python3 -m venv .venv
@@ -23,14 +27,76 @@ cp .env.example .env
 # edit .env and add your API keys
 ```
 
+### Docker
+
+On any machine with Docker installed, you don't need to clone the repo. The compose file pulls and builds everything from GitHub automatically:
+
+On any machine with Docker installed, you don't need to clone the repo. Download the compose file, create a `.env` with your API keys, then start the container:
+
+```bash
+curl -o docker-compose.yml "https://raw.githubusercontent.com/aklambeth/myRunList-scraper/refs/heads/master/docker-compose.yml"
+```
+
+Create a `.env` file in the same directory with the following keys:
+
+```bash
+NH4_API_KEY=                 # Google Sheet gid (see docs/NH4.md)
+DH3_API_KEY=                 # Fouita widget UID (see docs/DH3.md)
+GOOGLE_GEOCODING_API_KEY=    # optional; shared key for the geocoding enrichment fallback
+```
+
+Then start the container:
+
+```bash
+docker compose up -d
+```
+
+Docker Compose reads `.env` automatically and injects the keys into the container. `data/`, `logs/`, and `output/` are created on the host automatically and mounted into the container so output persists across restarts.
+
+#### Running commands
+
+Exec into the container for an interactive shell with aliases pre-loaded:
+
+```bash
+docker exec -it myrunlist bash
+```
+
+Or run a single command directly:
+
+```bash
+docker exec myrunlist bash -c "<alias> [args]"
+```
+
+| Alias | Equivalent command | Notes |
+|---|---|---|
+| `run` | `python3 run.py` | Run all enabled scrapers |
+| `dry-run` | `python3 run.py --dry-run` | Validate output, no writes |
+| `status` | `python3 run.py --status` | Show TTL state of all scrapers |
+| `logs <name>` | `python3 run.py --getlogs <name>` | Print logs for a named scraper |
+| `reset <name>` | `python3 run.py --reset <name>` | Re-enable a disabled scraper |
+| `gen` | `python3 generate.py` | JSON to stdout |
+| `gen-html` | `python3 generate.py --html output/index.html --transform latest` | Write HTML to output/ |
+| `gen-json` | `python3 generate.py --json output/runs.json --transform latest` | Write JSON to output/ |
+
+### Dev container (VS Code / Codespaces)
+
+Open the repo in VS Code and choose **Reopen in Container**. The dev container installs Python dependencies and the MCP server automatically via `postCreateCommand`.
+
 ### Environment variables
 
 ```bash
-NH4_API_KEY=   # Google Sheet gid (see docs/NH4.md)
-DH3_API_KEY=   # Fouita widget UID (see docs/DH3.md)
+NH4_API_KEY=                 # Google Sheet gid (see docs/NH4.md)
+DH3_API_KEY=                 # Fouita widget UID (see docs/DH3.md)
+GOOGLE_GEOCODING_API_KEY=    # optional; shared key for the geocoding enrichment fallback
 ```
 
 GH3 and R2D2H3 require no API keys.
+
+`GOOGLE_GEOCODING_API_KEY` is optional and not tied to any single site. The generator
+resolves `location.lat`/`lng` for records that have an address/postcode but no coordinates
+and no What3Words (e.g. WWH3). With the key set it uses the Google Geocoding API; when the
+key is unset or Google is unavailable it falls back to the keyless Nominatim / OpenStreetMap
+geocoder, so enrichment works even with no key configured.
 
 ## Usage
 
@@ -57,7 +123,6 @@ python3 generate.py --json output/runs.json               # JSON to file
 python3 generate.py --html output/index.html              # self-contained HTML to file
 python3 generate.py --json --html output/index.html       # both at once
 python3 generate.py --json --transform latest             # one record per kennel, future runs only
-python3 generate.py --json --transform latest             # one record per kennel, piped JSON
 ```
 
 The generator reads from `data/*.json` and is independent of the scraper — run them on different schedules as needed.
@@ -85,6 +150,34 @@ The MCP server exposes the pipeline as tools for LLM access. Requires Python ≥
 | `set_scraper_enabled` | Toggle a scraper on/off in `config.yaml` |
 | `set_scraper_ttl_max` | Set TTL max for a scraper in `config.yaml` |
 
+#### VS Code `.mcp.json`
+
+**Local (virtualenv):**
+
+```json
+{
+  "mcpServers": {
+    "myRunList": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "mcpserver.server"]
+    }
+  }
+}
+```
+
+**Docker** (container must be running via `docker compose up -d`):
+
+```json
+{
+  "mcpServers": {
+    "myRunList": {
+      "command": "docker",
+      "args": ["exec", "-i", "myrunlist", "python3", "-m", "mcpserver.server"]
+    }
+  }
+}
+```
+
 ## Circuit breaker
 
 Each scraper has a `ttl_max` (default 5). A failed run decrements the TTL; three consecutive auth failures or one fatal failure disables the scraper automatically. Use `--reset <name>` to re-enable.
@@ -94,6 +187,10 @@ Each scraper has a `ttl_max` (default 5). A failed run decrements the TTL; three
 | Transient (404, 500, parse error) | −1 |
 | Auth (401, 403) | −2 |
 | Fatal (endpoint gone, schema change) | → 0 immediately |
+
+The generator's location-enrichment steps have their own independent breakers — state keys
+`enrich_w3w` (What3Words), `enrich_geocode` (Google Geocoding) and `enrich_nominatim`
+(OpenStreetMap) — so a failing enrichment service disables only itself, never a scraper.
 
 ## Tests
 
